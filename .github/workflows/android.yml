@@ -1,0 +1,78 @@
+name: Android
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:   # the "Run workflow" button: builds AND publishes a downloadable APK release
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Works if you uploaded RatingApp.zip as-is, OR if the project files are in the repo.
+      - name: Find the Android project
+        id: p
+        run: |
+          if [ -f RatingApp.zip ]; then
+            mkdir -p _src && unzip -q -o RatingApp.zip -d _src
+            F=$(find _src -name settings.gradle.kts -not -path '*/__MACOSX/*' | head -1)
+          else
+            F=$(find . -maxdepth 3 -name settings.gradle.kts | head -1)
+          fi
+          [ -n "$F" ] || { echo "::error::Could not find settings.gradle.kts - did you upload RatingApp.zip?"; exit 1; }
+          echo "dir=$(dirname "$F")" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+
+      - name: Build APK
+        working-directory: ${{ steps.p.outputs.dir }}
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            export VERSION_NAME="${GITHUB_REF_NAME#v}"
+          else
+            export VERSION_NAME="0.1.${GITHUB_RUN_NUMBER}"
+          fi
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
+            export KEYSTORE_PATH="$RUNNER_TEMP/release.jks"
+            gradle assembleRelease --stacktrace
+            cp app/build/outputs/apk/release/app-release.apk "$GITHUB_WORKSPACE/RatingApp-$VERSION_NAME.apk"
+          else
+            echo "::notice::No signing secrets set - building a debug-signed APK (installs fine on your own phone)."
+            gradle assembleDebug --stacktrace
+            cp app/build/outputs/apk/debug/app-debug.apk "$GITHUB_WORKSPACE/RatingApp-$VERSION_NAME.apk"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RatingApp-apk
+          path: RatingApp-*.apk
+
+      # Tag push (v1.2.3) => normal release. Manual run => pre-release named build-<number>.
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('build-{0}', github.run_number) }}
+          target_commitish: ${{ github.sha }}
+          prerelease: ${{ github.event_name == 'workflow_dispatch' }}
+          files: RatingApp-*.apk
+          generate_release_notes: true
